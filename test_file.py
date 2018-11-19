@@ -8,12 +8,11 @@ from gmm import *
 from ed_nn import *
 
 data,centers,covariance=get_nonsequential_data(500,d=2,m=4)
-model=GMM(n_mixture=2)
-LL=model.fit(data)
+# model=GMM(n_mixture=2)
+# LL=model.fit(data)
 ednn=EDNN(D=2)
 ednn.init_parameters(identity=True)
-print(np.mean(data,axis=0).shape)
-loss=ednn.learn_identity(data+5)
+loss=ednn.learn_double_identity(data)
 print('final loss: '+str(loss))
 # print(model.score(data))
 # samples=model.sample(50)

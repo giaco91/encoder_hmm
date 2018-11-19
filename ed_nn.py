@@ -55,6 +55,46 @@ class EDNN():
     		z.append(x)
     	return z
 
+    def learn_double_identity(self,x):
+    	precision=20
+    	#precompensate bias
+    	data_mean=np.mean(x,axis=0)
+    	self.encoder_parameters[0][1]=-data_mean
+    	self.decoder_parameters[0][1]=-data_mean
+    	self.encoder_parameters[1][1]=data_mean
+    	self.decoder_parameters[1][1]=data_mean
+
+    	start_time = time.time()
+    	print_time=self.print_every
+    	step=1e-5
+    	old_loss=1e10
+    	z=self.forward(x)
+    	de_dec=precision*(z[-1]-x)#nd-tensor
+    	de_enc=z[-3]-x
+    	new_loss=np.einsum('nd,nd',de_dec,de_dec)+np.einsum('nd,nd',de_enc,de_enc)
+    	improvement=(old_loss-new_loss)/np.abs(old_loss)
+    	iter=0
+    	while improvement>self.crit:
+    		#gradient descent step
+    		self.backprop_decoder(x,z,de_dec=de_dec,de_enc=de_enc,step=step)
+    		#forward evaluation
+    		z=self.forward(x)
+    		de_dec=precision*(z[-1]-x)
+    		de_enc=z[-3]-x
+    		old_loss=new_loss
+    		new_loss=np.einsum('nd,nd',de_dec,de_dec)+np.einsum('nd,nd',de_enc,de_enc)
+    		if old_loss-new_loss<0:
+    			step/=2
+    			print('decrease stepsize at epoch: '+str(iter))
+    		improvement=0.9*improvement+0.1*(old_loss-new_loss)/np.abs(old_loss)#running average
+    		current_time=time.time()-start_time
+    		if current_time>print_time:
+    			loss_str='loss_decoder: '+str(np.einsum('nd,nd',de_dec,de_dec)/precision**2)+', loss_encoder: '+str(np.einsum('nd,nd',de_enc,de_enc))
+    			print('Epoch: '+str(iter)+', Training time: '+str(int(current_time))+'s, '+loss_str+', last improvement: '+str(improvement))
+    			print_time=current_time+self.print_every
+    		iter+=1
+    	return new_loss
+
     def learn_identity(self,x):
     	#precompensate bias
     	data_mean=np.mean(x,axis=0)
@@ -64,7 +104,7 @@ class EDNN():
     	start_time = time.time()
     	print_time=self.print_every
     	step=1e-4
-    	old_loss=[1e10]
+    	old_loss=1e10
     	z=self.forward(x,encoder_only=True)
     	de=z[-1]-x#nd-tensor
     	new_loss=np.einsum('nd,nd',de,de)#actually devided by two
@@ -115,34 +155,40 @@ class EDNN():
     	self.encoder_parameters[-2][0]-=step*np.einsum('nij,ni->ij',dz1_dA1,de_dz1)
     	self.encoder_parameters[-2][1]-=step*np.einsum('ni,ni->i',dtanh,de_dz1)
 
-    def backprop_decoder(self,x,z,de,step=1e-5,update_decoder_only=False):
+    def backprop_decoder(self,x,z,de_dec,de_enc=None,step=1e-5,update_decoder_only=False):
     	#z is a list of all activations
-    	de_dA4=np.einsum('nd,nD->dD',de,z[-2])
+    	de_dA4=np.einsum('nd,nD->dD',de_dec,z[-2])
     	self.decoder_parameters[-1][0]-=step*de_dA4
-    	de_db4=np.einsum('nd->d',de)
+    	de_db4=np.einsum('nd->d',de_dec)
 
     	self.decoder_parameters[-1][1]-=step*de_db4
     	
     	#h_loop in the decoder comes here
-    	de_dz3=np.einsum('nk,ki->ni',de,self.decoder_parameters[-1][0])
+    	de_dz3=np.einsum('nk,ki->ni',de_dec,self.decoder_parameters[-1][0])
     	dtanh_3=1-np.square(z[-2])
     	dz3_dA3=np.einsum('ni,nj->nij',dtanh_3,z[-3])
     	self.decoder_parameters[-2][0]-=step*np.einsum('nij,ni->ij',dz3_dA3,de_dz3)    	
     	self.decoder_parameters[-2][1]-=step*np.einsum('ni,ni->i',dtanh_3,de_dz3)
-
+    	
     	if not update_decoder_only:
-	    	dz3_dz2=np.einsum('nl,li->nli',dthan_3,self.decoder_parameters[-2][0])
-	    	de_dz2=np.einsum('nli,nl->ni',dz3_dz2,de_dz_3)
+	    	dz3_dz2=np.einsum('nl,li->nli',dtanh_3,self.decoder_parameters[-2][0])
+	    	de_dec_dz2=np.einsum('nli,nl->ni',dz3_dz2,de_dz3)
 	    	dz2_dA2=z[-4]#(ND-tensor),no activation at the latent encoder ouput
-	    	self.encoder_parameters[-1][0]-=step*np.einsum('nj,ni->ij',dz2_dA2,de_dz2)
-	    	self.encoder_parameters[-1][1]-=step*np.einsum('ni->i',de_dz2)
+	    	de_dec_dA2=np.einsum('nj,ni->ij',dz2_dA2,de_dec_dz2)
+	    	de_enc_dA2=np.einsum('nd,nD->dD',de_enc,z[-4])
+	    	self.encoder_parameters[-1][0]-=step*(de_dec_dA2+de_enc_dA2)
+	    	self.encoder_parameters[-1][1]-=step*(np.einsum('ni->i',de_dec_dz2)+np.einsum('nd->d',de_enc))
 
-	    	dz2_dz1=self.decoder_parameters[-3][0]#no activation at encoder output
-	    	de_dz1=np.einsum('mi,nm->ni',dz2_dz1,de_dz_2)
+	    	#h_loop in the encoder comes here
+	    	dz2_dz1=self.encoder_parameters[-1][0]#no activation at encoder output
+	    	de_dec_dz1=np.einsum('mi,nm->ni',dz2_dz1,de_dec_dz2)
 	    	dtanh_1=1-np.square(z[-4])
-	    	dz1_dA1=np.einsum('ni,nj->nij',z[-4],x)#(ND-tensor),no activation at the latent encoder ouput
-	    	self.encoder_parameters[-2][0]-=step*np.einsum('nij,ni->ij',dz1_dA1,de_dz1)
-	    	self.encoder_parameters[-2][1]-=step*np.einsum('ni,ni->i',dtanh_1,de_dz1)    	      	
+	    	dz1_dA1=np.einsum('ni,nj->nij',dtanh_1,x)
+	    	de_dec_dA1=np.einsum('nij,ni->ij',dz1_dA1,de_dec_dz1)
+	    	de_enc_dz1=np.einsum('nk,ki->ni',de_enc,self.encoder_parameters[-1][0])
+	    	de_enc_dA1=np.einsum('nij,ni->ij',dz1_dA1,de_enc_dz1)
+	    	self.encoder_parameters[-2][0]-=step*(de_dec_dA1+de_enc_dA1)
+	    	self.encoder_parameters[-2][1]-=step*(np.einsum('ni,ni->i',dtanh_1,de_dec_dz1)+step*np.einsum('ni,ni->i',dtanh_1,de_enc_dz1))   	      	
 
 
 
